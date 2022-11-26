@@ -1,2 +1,5 @@
 # Advanced-Robotics-Hopping-Robot
-Advanced robotics course project. To do a simulation of hopping robot with forward velocity control and height control
+Advanced Robotics (ENGG5402@CUHK) course project, which includes:
+- 2D Hybrid Dynamics (with soft contacts) of hopping robot;
+- Implementation of Raibert controller that controls forward velocity and hopping height;
+- Visualization of simulation results and animations.
