@@ -1,0 +1,228 @@
+<mujoco model="planar_biped_hopper">
+  <!-- Planar 2-legged (humanoid-style) hopping robot. Compared to the MATLAB
+       derivation (set_model.m: a point mass + massless leg), the torso here is
+       a real rigid body with its own free pitch DOF, and there are **two**
+       identical two-link legs (thigh/shin) hanging from a pelvis: each has an
+       actuated hip (torso->thigh) and an actuated knee (thigh->shin).
+
+       The model is still strictly **planar** - the only floating DOFs are
+       slide_x, slide_z and torso_pitch - so the two legs live in the same
+       sagittal plane and are offset in y purely so the robot looks (and
+       renders) like a biped. There is no roll/yaw to destabilise, which is
+       what lets the single-leg Raibert control laws carry over: the legs are
+       driven as a symmetric pair, each carrying half the load (a two-legged
+       pronk rather than an alternating gait).
+
+       Leg length and leg angle are not independent controllable DOFs - both
+       are emergent from (hip, knee, torso_pitch), so the controller needs real
+       2-link kinematics (controller.py) to convert a desired radial leg
+       length/angle into joint torques.
+
+       Physics (contact, integration) is handled entirely by MuJoCo - no
+       hand-derived M/C/G matrices or hybrid-phase ODE switching. -->
+
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.0005" gravity="0 0 -10" integrator="implicitfast" cone="elliptic"/>
+
+  <default>
+    <!-- friction kept moderate (not high-grip) and solref left near MuJoCo's
+         own default softness - an overly stiff/grippy foot contact turns
+         even small touchdown velocity offsets into large torques through the
+         leg's lever arm, which was making the torso tip almost instantly. -->
+    <geom friction="0.8 0.005 0.0001" solref="0.02 1"/>
+    <!-- Decoration: every purely cosmetic geom inherits this class, which
+         makes it massless and non-colliding. The gait is sensitive to the
+         leg's inertia, so appearance must never leak into the dynamics -
+         a decorative geom left at MuJoCo's default density would silently
+         retune the robot. -->
+    <default class="visual">
+      <geom mass="0" contype="0" conaffinity="0" group="0"/>
+    </default>
+    <!-- Both legs are identical; anything shared between them lives here so
+         the pair can never drift out of sync through a one-sided edit. -->
+    <default class="leg">
+      <joint type="hinge" axis="0 -1 0" pos="0 0 0"/>
+      <geom type="capsule" material="link_mat" contype="0" conaffinity="0"/>
+    </default>
+  </default>
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1"/>
+    <map znear="0.01" zfar="40"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <texture name="skybox" type="skybox" builtin="gradient"
+             rgb1="0.35 0.45 0.6" rgb2="0.08 0.1 0.15" width="256" height="256"/>
+    <!-- A patterned floor is not just decoration here: against a flat colour
+         the robot appears to hop in place, because the camera tracks it and
+         there is nothing to reference 20+ m of forward travel against. -->
+    <texture name="grid_tex" type="2d" builtin="checker" mark="edge" markrgb="0.8 0.8 0.8"
+             rgb1="0.26 0.28 0.32" rgb2="0.20 0.22 0.26" width="300" height="300"/>
+    <material name="grid" texture="grid_tex" texrepeat="4 4" texuniform="true" reflectance="0.15"/>
+    <material name="torso_mat" rgba="0.49 0.18 0.56 1" specular="0.4" shininess="0.5"/>
+    <material name="link_mat" rgba="0.22 0.23 0.26 1" specular="0.5" shininess="0.6"/>
+    <material name="joint_mat" rgba="0.95 0.62 0.12 1" specular="0.6" shininess="0.7"/>
+    <material name="foot_mat" rgba="0.08 0.08 0.09 1" specular="0.3" shininess="0.4"/>
+  </asset>
+
+  <worldbody>
+    <light name="key" pos="0 -2 4" dir="0 0.4 -1" directional="true"
+           diffuse="0.7 0.7 0.7" specular="0.3 0.3 0.3" castshadow="true"/>
+    <light name="fill" pos="0 3 3" dir="0 -1 -1" directional="true"
+           diffuse="0.25 0.25 0.3" castshadow="false"/>
+    <geom name="floor" type="plane" size="60 5 0.1" material="grid"/>
+
+    <!-- The torso body frame is the *pelvis*: z=0 is the hip axis height, and
+         the trunk is built upwards from there. Keeping the origin at the hips
+         (rather than at the trunk's centre) means the leg kinematics in
+         controller.py are unchanged from the single-leg version - the hip is
+         still at the body origin. -->
+    <body name="torso" pos="0 0 0">
+      <joint name="slide_x" type="slide" axis="1 0 0" damping="0"/>
+      <joint name="slide_z" type="slide" axis="0 0 1" damping="0"/>
+      <!-- torso pitch: a real, unactuated attitude DOF. Nothing drives it
+           directly - it only moves via the reaction torques of the two hip
+           joints, so the robot must actively balance it (classic Raibert 3rd
+           control loop), same axis convention as the hips below so
+           theta_world = torso_pitch + hip (they compose by simple addition). -->
+      <joint name="torso_pitch" type="hinge" axis="0 -1 0" damping="0.2"/>
+      <!-- Upper body ("HAT": head, arms, trunk). Segment *lengths* are
+           standard anthropometry for a stature of H = 0.70 m - trunk from the
+           hip axis to the shoulders is 0.288 H = 0.202 m, head+neck another
+           0.182 H - and so are the leg lengths below.
+
+           The *mass* distribution deliberately is NOT human. A human carries
+           ~32% of body mass in the legs; at that fraction this robot cannot
+           hop. Flight conserves angular momentum, so swinging both legs
+           forward to the touchdown angle pitches the trunk backwards by
+           I_legs/I_torso of the swing - measured at 0.56, i.e. a 0.6 rad leg
+           swing threw the torso back 0.34 rad. The torso then rode at a
+           steady -0.44 rad mean lean (upright in stance, pitched back through
+           the much longer flight phase), and the leg never reached its
+           commanded touchdown angle, so foot placement lost all authority
+           over forward speed. Concentrating mass proximally - legs down to
+           ~18% of body mass, the rest in the trunk - cuts that coupling to
+           ~0.27. Real hopping machines do exactly this, and for exactly this
+           reason: Raibert's hoppers ran near-massless legs, and ATRIAS/Cassie
+           put the motors at the hip precisely to keep leg inertia low. -->
+      <geom name="torso_geom" type="box" size="0.05 0.06 0.101" pos="0 0 0.101"
+            mass="0.88" material="torso_mat" contype="0" conaffinity="0"/>
+      <geom name="head" type="sphere" size="0.05" pos="0.005 0 0.277"
+            mass="0.18" material="torso_mat" contype="0" conaffinity="0"/>
+      <!-- Cosmetic only: pelvis yoke across the hips, neck, shoulder stubs.
+           All massless and non-colliding (class "visual"), so the humanoid
+           silhouette costs the dynamics nothing. -->
+      <geom class="visual" name="pelvis" type="cylinder"
+            fromto="0 -0.068 0 0 0.068 0" size="0.035" material="torso_mat"/>
+      <geom class="visual" name="neck" type="capsule"
+            fromto="0 0 0.198 0 0 0.232" size="0.019" material="link_mat"/>
+      <geom class="visual" name="shoulders" type="cylinder"
+            fromto="0 -0.085 0.188 0 0.085 0.188" size="0.026" material="link_mat"/>
+      <!-- nose marker: shows which way the robot is facing, so pitch is
+           readable at a glance in the viewer -->
+      <geom class="visual" name="torso_nose" type="box" size="0.014 0.024 0.014"
+            pos="0.049 0 0.283" material="joint_mat"/>
+      <!-- Side-on chase camera. The robot covers 20+ m in a 30 s run, so with
+           a fixed camera it hops straight out of frame within seconds. Select
+           it in the viewer with Tab (or the camera dropdown). trackcom
+           follows position without inheriting the torso's pitch, so the
+           horizon stays level instead of rocking with every stride. -->
+      <camera name="track" mode="trackcom" pos="0 -2.1 0.15" xyaxes="1 0 0 0 0.25 1"/>
+
+      <!-- ===================== left leg ===================== -->
+      <body name="thigh_l" pos="0 0.068 0">
+        <!-- hip: actuated revolute joint between torso and thigh. Its qpos is
+             the angle *relative to the torso*, not the world - the world
+             thigh angle is torso_pitch + hip. -->
+        <joint class="leg" name="hip_l" damping="0.2"/>
+        <!-- hip actuator housing: drawn on the hinge axis (y) so the joint
+             reads as a real revolute joint rather than a kink in the leg. -->
+        <geom class="visual" name="hip_l_cylinder" type="cylinder"
+              fromto="0 -0.030 0 0 0.030 0" size="0.032" material="joint_mat"/>
+        <!-- carries the thigh's 0.06 kg: size and mass fixed, styling only -->
+        <geom class="leg" name="thigh_l_visual" fromto="0 0 0 0 0 -0.17"
+              size="0.022" mass="0.07"/>
+
+        <body name="shin_l" pos="0 0 -0.17">
+          <!-- knee: actuated revolute joint between thigh and shin, qpos=0 means
+               fully straight (shin collinear with thigh, l = L1+L2 = 0.22).
+               Since L1 = L2, the hip-to-foot line always exactly bisects the
+               thigh/shin angle, so world leg (hip->foot) angle = torso_pitch +
+               hip + knee/2 - see controller.py.
+               There is deliberately NO passive joint spring here: like the MIT
+               Cheetah / ANYmal / Unitree quadrupeds, both joints are plain
+               torque-controlled motors and the leg's compliance (the SLIP
+               spring k*(l-L0) of Stance_EoM.m) is emulated *actively* by the
+               controller as a virtual spring-damper along the leg. Range only
+               keeps the knee away from the q=0 singularity (a straight leg
+               has no knee-torque authority over leg length) and from folding
+               past a reasonable crouch. -->
+          <joint class="leg" name="knee_l" range="-2.0 -0.25" limited="true" damping="0.05"/>
+          <!-- knee actuator housing, on the hinge axis; slightly smaller than
+               the hip to read as the lighter distal joint -->
+          <geom class="visual" name="knee_l_cylinder" type="cylinder"
+                fromto="0 -0.028 0 0 0.028 0" size="0.026" material="joint_mat"/>
+          <!-- carries the shin's 0.04 kg: size and mass fixed, styling only -->
+          <geom class="leg" name="shin_l_visual" fromto="0 0 0 0 0 -0.17"
+                size="0.018" mass="0.035"/>
+          <!-- one of the only two colliding geoms on the robot -->
+          <geom name="foot_l" type="sphere" size="0.028" pos="0 0 -0.17"
+                mass="0.015" material="foot_mat"/>
+        </body>
+      </body>
+
+      <!-- ===================== right leg ====================
+           Identical to the left in every respect except the y offset; the
+           controller drives the pair symmetrically. -->
+      <body name="thigh_r" pos="0 -0.068 0">
+        <joint class="leg" name="hip_r" damping="0.2"/>
+        <geom class="visual" name="hip_r_cylinder" type="cylinder"
+              fromto="0 -0.030 0 0 0.030 0" size="0.032" material="joint_mat"/>
+        <geom class="leg" name="thigh_r_visual" fromto="0 0 0 0 0 -0.17"
+              size="0.022" mass="0.07"/>
+
+        <body name="shin_r" pos="0 0 -0.17">
+          <joint class="leg" name="knee_r" range="-2.0 -0.25" limited="true" damping="0.05"/>
+          <geom class="visual" name="knee_r_cylinder" type="cylinder"
+                fromto="0 -0.028 0 0 0.028 0" size="0.026" material="joint_mat"/>
+          <geom class="leg" name="shin_r_visual" fromto="0 0 0 0 0 -0.17"
+                size="0.018" mass="0.035"/>
+          <geom name="foot_r" type="sphere" size="0.028" pos="0 0 -0.17"
+                mass="0.015" material="foot_mat"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- hip torques: real motors, driven by an actual feedback controller
+         (controller.py) that has to read torso_pitch to know the true world
+         leg angle, and to actively balance the torso during stance. The two
+         hips share the attitude torque, so each carries half.
+         NOTE: data.ctrl order is (hip_l, knee_l, hip_r, knee_r) - sim.py and
+         controller.py both assume this interleaved per-leg layout. -->
+    <motor name="hip_l_torque" joint="hip_l" gear="1" ctrlrange="-200 200"/>
+    <!-- knee torque: carries the virtual leg spring / thrust force, converted
+         through the leg-length Jacobian dl/dq - see controller.py. -->
+    <motor name="knee_l_torque" joint="knee_l" gear="1" ctrlrange="-100 100"/>
+    <motor name="hip_r_torque" joint="hip_r" gear="1" ctrlrange="-200 200"/>
+    <motor name="knee_r_torque" joint="knee_r" gear="1" ctrlrange="-100 100"/>
+  </actuator>
+
+  <keyframe>
+    <!-- qpos = (x, z, torso_pitch, hip_l, knee_l, hip_r, knee_r).
+         Standing on both feet in the walking gait's phase-0 pose: left leg
+         forward at +step/2, right leg trailing, pelvis at stand_height plus
+         the foot radius so the feet rest exactly on the floor. Starting the
+         walker anywhere else means the schedule's first stance phase fires
+         while the legs are still falling. (The `hop` gait tolerates this
+         keyframe too - it simply starts from a stand rather than a drop.) -->
+    <key name="home"
+         qpos="0 0.328 0 0.6994 -0.7314 0.2720 -0.9130"
+         qvel="0 0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>
