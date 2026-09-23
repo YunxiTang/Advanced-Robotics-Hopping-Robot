@@ -5,16 +5,16 @@ description = "3-D biped walking in MuJoCo under a convex MPC controller"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "daqp>=0.9.1",
     "matplotlib>=3.11.2",
     "mujoco>=3.13.0",
     "numpy>=2.4.6",
-    "osqp>=1.1.3",
-    "scipy>=1.17.1",
 ]
 
 [project.scripts]
 # one-line launch: `uv run biped --view`
 biped = "mujoco_sim.sim:main"
+biped-avoid = "mujoco_sim.local_planner:main"
 
 # Needed for the `biped` script to be installed at all: without a build
 # backend uv treats this as a virtual project, skips installing it, and

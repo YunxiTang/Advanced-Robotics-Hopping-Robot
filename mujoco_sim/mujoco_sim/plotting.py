@@ -74,11 +74,13 @@ def plot_results(arrays: dict, params: MPCGaitParams):
 
     # No stance shading, unlike the planar plots: in a walk one foot or the
     # other is always down, so "in stance" is true almost everywhere and the
-    # band would just grey out every panel.
+    # band would just grey out every panel; running, the flights are 26 ms
+    # each, eight a second, too fine to read as bands.
     for ax in [ax_path, *axs]:
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle(f"3-D biped (MuJoCo) — command: forward {params.Vs} m/s, "
+    gait = "running" if arrays["duty"][-1] < 0.5 else "walking"
+    fig.suptitle(f"3-D biped (MuJoCo), {gait} — command: forward {params.Vs} m/s, "
                  f"left {params.Vy} m/s, turn {params.yaw_rate} rad/s, "
                  f"height {params.z_des} m")
     fig.tight_layout()
