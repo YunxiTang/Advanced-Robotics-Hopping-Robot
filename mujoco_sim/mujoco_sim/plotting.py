@@ -1,53 +1,85 @@
-"""Plot simulation results (mirrors the figures produced by Data_draw.m)."""
+"""Plot simulation results: path, speed, height, attitude, leg length and energy."""
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .controller import ControllerParams
+from .controller import MPCGaitParams
 
 
-def plot_results(arrays: dict, params: ControllerParams):
+def plot_results(arrays: dict, params: MPCGaitParams):
     t = arrays["t"]
-    stance = arrays["stance"]
 
-    fig, axs = plt.subplots(3, 2, figsize=(11, 9), sharex=True)
+    fig = plt.figure(figsize=(12, 10))
+    gs = fig.add_gridspec(4, 2)
+    ax_path = fig.add_subplot(gs[0:2, 0])
+    axs = [fig.add_subplot(gs[i, 1]) for i in range(4)] + \
+          [fig.add_subplot(gs[2, 0]), fig.add_subplot(gs[3, 0])]
+    for ax in axs[1:]:
+        ax.sharex(axs[0])
 
-    axs[0, 0].plot(t, arrays["z"], label="height z")
-    axs[0, 0].axhline(params.Hs, color="r", ls="--", label="Hs (desired)")
-    axs[0, 0].set_ylabel("z (m)")
-    axs[0, 0].legend(loc="upper right")
-    axs[0, 0].set_title("Body height")
+    # Top view: the one plot the planar version could not have.
+    ax_path.plot(arrays["x"], arrays["y"], lw=1)
+    ax_path.plot(arrays["x"][0], arrays["y"][0], "go", label="start")
+    ax_path.plot(arrays["x"][-1], arrays["y"][-1], "rs", label="end")
+    ax_path.set_aspect("equal", adjustable="datalim")
+    ax_path.set_xlabel("x (m)")
+    ax_path.set_ylabel("y (m)")
+    ax_path.legend(loc="best")
+    ax_path.set_title("CoM path (top view)")
 
-    axs[0, 1].plot(t, arrays["dx"], label="forward velocity dx")
-    axs[0, 1].axhline(params.Vs, color="r", ls="--", label="Vs (desired)")
-    axs[0, 1].set_ylabel("dx (m/s)")
-    axs[0, 1].legend(loc="upper right")
-    axs[0, 1].set_title("Forward velocity")
+    ax = axs[0]
+    ax.plot(t, arrays["v_fwd"], label="forward")
+    ax.plot(t, arrays["v_lat"], label="left")
+    ax.axhline(params.Vs, color="C0", ls="--", lw=1)
+    ax.axhline(params.Vy, color="C1", ls="--", lw=1)
+    ax.set_ylabel("v (m/s)")
+    ax.legend(loc="upper right")
+    ax.set_title("Velocity in the heading frame (dashed: commanded)")
 
-    axs[1, 0].plot(t, arrays["x"])
-    axs[1, 0].set_ylabel("x (m)")
-    axs[1, 0].set_title("Horizontal position")
+    ax = axs[1]
+    ax.plot(t, np.rad2deg(arrays["roll"]), label="roll")
+    ax.plot(t, np.rad2deg(arrays["pitch"]), label="pitch")
+    ax.set_ylabel("angle (deg)")
+    ax.legend(loc="upper right")
+    ax.set_title("Torso attitude")
 
-    axs[1, 1].plot(t, np.rad2deg(arrays["theta"]))
-    axs[1, 1].set_ylabel("theta (deg)")
-    axs[1, 1].set_title("Hip / leg angle")
+    ax = axs[2]
+    ax.plot(t, np.rad2deg(arrays["yaw"]))
+    if params.yaw_rate:
+        ax.plot(t, np.rad2deg(arrays["yaw"][0] + params.yaw_rate * t), "r--", lw=1,
+                label="commanded")
+        ax.legend(loc="upper left")
+    ax.set_ylabel("yaw (deg)")
+    ax.set_title("Heading")
 
-    axs[2, 0].plot(t, arrays["leg_len"])
-    axs[2, 0].set_ylabel("l (m)")
-    axs[2, 0].set_xlabel("time (s)")
-    axs[2, 0].set_title("Leg length")
+    ax = axs[3]
+    ax.plot(t, arrays["z"], label="height z")
+    ax.axhline(params.z_des, color="r", ls="--", label="desired")
+    ax.set_ylabel("z (m)")
+    ax.set_xlabel("time (s)")
+    ax.legend(loc="upper right")
+    ax.set_title("CoM height")
 
-    axs[2, 1].plot(t, arrays["energy"])
-    axs[2, 1].set_ylabel("Energy (J)")
-    axs[2, 1].set_xlabel("time (s)")
-    axs[2, 1].set_title("Total mechanical energy")
+    ax = axs[4]
+    ax.plot(t, arrays["leg_len"])
+    ax.set_ylabel("l (m)")
+    ax.set_title("Leg length (mean of both legs)")
 
-    for ax in axs.flat:
-        ax.fill_between(t, *ax.get_ylim(), where=stance, color="0.85", zorder=0,
-                         step="post", label="_stance")
+    ax = axs[5]
+    ax.plot(t, arrays["energy"])
+    ax.set_ylabel("Energy (J)")
+    ax.set_xlabel("time (s)")
+    ax.set_title("Body mechanical energy")
+
+    # No stance shading, unlike the planar plots: in a walk one foot or the
+    # other is always down, so "in stance" is true almost everywhere and the
+    # band would just grey out every panel.
+    for ax in [ax_path, *axs]:
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle(f"Planar hopper (MuJoCo) — Hs={params.Hs} m, Vs={params.Vs} m/s")
+    fig.suptitle(f"3-D biped (MuJoCo) — command: forward {params.Vs} m/s, "
+                 f"left {params.Vy} m/s, turn {params.yaw_rate} rad/s, "
+                 f"height {params.z_des} m")
     fig.tight_layout()
     plt.show()

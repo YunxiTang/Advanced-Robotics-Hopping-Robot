@@ -1,0 +1,364 @@
+<mujoco model="biped_3d">
+  <!-- 3-D two-legged (humanoid-style) walking robot. The torso is a real
+       rigid body on a **free joint** - all six floating DOFs (x, y, z, roll,
+       pitch, yaw) are unactuated - and there are **two** identical legs
+       hanging from a pelvis. Each leg has three actuated joints:
+
+         hip_roll  (abduction/adduction, about the torso's x axis)
+         hip       (flexion/extension - "hip pitch" - about the rolled -y axis)
+         knee      (about the same -y axis, one thigh-length further down)
+
+       hip_roll and hip share a body and a pivot point, i.e. the hip is a
+       2-DOF universal joint. That is what keeps the swing-leg inverse
+       kinematics closed-form (controller.py): roll picks the plane the leg
+       lives in, and inside that plane the leg is exactly the planar
+       isosceles 2-link chain this package started from.
+
+       There is no hip *yaw* joint. With point feet it is not needed to turn:
+       a point contact cannot resist spinning (condim 3, no torsional
+       friction), so the leg simply pivots on the foot while the MPC makes the
+       yaw moment from `r x f` - the same way it makes the roll and pitch
+       moments.
+
+       Physics (contact, integration) is handled entirely by MuJoCo - no
+       hand-derived M/C/G matrices and no hybrid-phase ODE switching. The
+       controller reads stance vs. swing off the contact list. -->
+
+  <compiler angle="radian" autolimits="true"/>
+
+  <option timestep="0.0005" gravity="0 0 -10" integrator="implicitfast" cone="elliptic"/>
+
+  <default>
+    <!-- friction kept moderate (not high-grip) and solref left near MuJoCo's
+         own default softness - an overly stiff/grippy foot contact turns
+         even small touchdown velocity offsets into large torques through the
+         leg's lever arm, which was making the torso tip almost instantly. -->
+    <geom friction="0.8 0.005 0.0001" solref="0.02 1"/>
+    <!-- Decoration: every purely cosmetic geom inherits this class, which
+         makes it massless and non-colliding. The gait is sensitive to the
+         leg's inertia, so appearance must never leak into the dynamics -
+         a decorative geom left at MuJoCo's default density would silently
+         retune the robot. -->
+    <default class="visual">
+      <geom mass="0" contype="0" conaffinity="0" group="0"/>
+    </default>
+    <!-- The reverse: geoms that carry the robot's mass but are not drawn.
+         Their simple boxes/capsules/spheres fix the inertia the gait was
+         tuned on; the styled shells (class "visual") are drawn over them.
+         Group 3 is hidden by default in both the viewer and the offscreen
+         renderer (toggle it with the "3" key in the viewer to see them). -->
+    <default class="inertial">
+      <geom contype="0" conaffinity="0" group="3" rgba="0.5 0.5 0.5 0.4"/>
+    </default>
+    <!-- Both legs are identical; anything shared between them lives here so
+         the pair can never drift out of sync through a one-sided edit. -->
+    <default class="leg">
+      <joint type="hinge" axis="0 -1 0" pos="0 0 0"/>
+      <geom type="capsule" contype="0" conaffinity="0" group="3" rgba="0.5 0.5 0.5 0.4"/>
+      <default class="hip_roll">
+        <joint axis="1 0 0" range="-0.6 0.6" damping="0.2"/>
+      </default>
+    </default>
+  </default>
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <headlight ambient="0.4 0.4 0.4" diffuse="0.6 0.6 0.6" specular="0.1 0.1 0.1"/>
+    <!-- Contact-force arrows (on in recorded videos and in the viewer; F in
+         the viewer toggles them): 1 cm per newton, so the robot's full
+         weight (12.8 N) on one foot draws a 13 cm arrow, a bit over a
+         third of the leg. Red, to stand apart from the white/grey/cyan
+         robot. -->
+    <!-- shadowclip is a fraction of the model extent (12 m, set by the
+         floor): 0.12 keeps the shadow map to ~1.5 m around the robot. -->
+    <map znear="0.01" zfar="40" force="0.01" shadowclip="0.12"/>
+    <scale forcewidth="0.12" contactwidth="0.08" contactheight="0.01"/>
+    <rgba contactforce="0.9 0.15 0.15 1"/>
+    <quality shadowsize="4096"/>
+  </visual>
+
+  <asset>
+    <texture name="skybox" type="skybox" builtin="gradient"
+             rgb1="0.35 0.45 0.6" rgb2="0.08 0.1 0.15" width="256" height="256"/>
+    <!-- A patterned floor is not just decoration here: against a flat colour
+         the robot appears to walk in place, because the camera tracks it and
+         there is nothing to reference the travel against. -->
+    <texture name="grid_tex" type="2d" builtin="checker" mark="edge" markrgb="0.8 0.8 0.8"
+             rgb1="0.26 0.28 0.32" rgb2="0.20 0.22 0.26" width="300" height="300"/>
+    <material name="grid" texture="grid_tex" texrepeat="4 4" texuniform="true" reflectance="0.15"/>
+    <!-- Palette in the style of current commercial humanoids (Unitree H1/G1
+         and similar): pale glossy shells over a graphite frame, machined
+         grey motor housings, and a cyan LED accent. -->
+    <material name="shell_mat" rgba="0.88 0.89 0.91 1" specular="0.7" shininess="0.85" reflectance="0.05"/>
+    <material name="frame_mat" rgba="0.13 0.14 0.16 1" specular="0.4" shininess="0.5"/>
+    <material name="motor_mat" rgba="0.38 0.40 0.43 1" specular="0.9" shininess="0.9"/>
+    <material name="cap_mat" rgba="0.62 0.64 0.67 1" specular="1" shininess="1"/>
+    <material name="visor_mat" rgba="0.03 0.03 0.04 1" specular="1" shininess="1" reflectance="0.3"/>
+    <material name="led_mat" rgba="0.15 0.8 1 1" emission="1"/>
+    <material name="foot_mat" rgba="0.08 0.08 0.09 1" specular="0.3" shininess="0.4"/>
+  </asset>
+
+  <worldbody>
+    <!-- Square now that the robot can walk sideways and turn. -->
+    <geom name="floor" type="plane" size="60 60 0.1" material="grid"/>
+
+    <!-- The torso body frame is the *pelvis*: z=0 is the hip axis height, and
+         the trunk is built upwards from there, so each hip pivot sits at a
+         fixed offset (0, +/-0.068, 0) in the torso frame. -->
+    <body name="torso" pos="0 0 0">
+      <!-- All six floating DOFs, none of them actuated: the trunk only moves
+           through the ground reaction forces the feet carry and the reaction
+           torques of the hip joints. qpos is (x, y, z, qw, qx, qy, qz); the
+           angular part of qvel is in the *body* frame. -->
+      <freejoint name="root"/>
+      <!-- Upper body ("HAT": head, arms, trunk). Segment *lengths* are
+           standard anthropometry for a stature of H = 0.70 m - trunk from the
+           hip axis to the shoulders is 0.288 H = 0.202 m, head+neck another
+           0.182 H - and so are the leg lengths below.
+
+           The *mass* distribution deliberately is NOT human. A human carries
+           ~32% of body mass in the legs; at that fraction this robot cannot
+           walk. A swinging leg's angular momentum is paid for by the trunk,
+           so swinging both legs forward pitches it backwards by
+           I_legs/I_torso of the swing - measured at 0.56, i.e. a 0.6 rad leg
+           swing threw the torso back 0.34 rad, and foot placement lost its
+           authority over forward speed. Concentrating mass proximally - legs
+           down to ~18% of body mass, the rest in the trunk - cuts that
+           coupling to ~0.27. Real machines do exactly this, and for exactly
+           this reason: ATRIAS and Cassie put the motors at the hip precisely
+           to keep leg inertia low. -->
+      <geom class="inertial" name="torso_geom" type="box" size="0.05 0.06 0.101"
+            pos="0 0 0.101" mass="0.88"/>
+      <geom class="inertial" name="head" type="sphere" size="0.05"
+            pos="0.005 0 0.277" mass="0.18"/>
+
+      <!-- Everything drawn from here on is cosmetic: massless and
+           non-colliding (class "visual"), so the styling costs the dynamics
+           nothing. -->
+      <!-- pelvis: graphite housing, brackets out to the hip-roll motors -->
+      <geom class="visual" name="pelvis" type="box" size="0.038 0.042 0.03"
+            pos="0 0 0.018" material="frame_mat"/>
+      <geom class="visual" name="pelvis_plate" type="box" size="0.004 0.034 0.02"
+            pos="0.039 0 0.02" material="shell_mat"/>
+      <geom class="visual" name="hip_bracket_l" type="box" size="0.014 0.016 0.016"
+            pos="-0.006 0.05 0.008" material="frame_mat"/>
+      <geom class="visual" name="hip_bracket_r" type="box" size="0.014 0.016 0.016"
+            pos="-0.006 -0.05 0.008" material="frame_mat"/>
+      <!-- hip-roll motors: their stators are fixed to the pelvis, so they
+           live here rather than on the thigh, drawn on the roll axis -->
+      <geom class="visual" name="hip_roll_l_motor" type="cylinder"
+            fromto="-0.042 0.068 0 0.03 0.068 0" size="0.025" material="motor_mat"/>
+      <geom class="visual" name="hip_roll_l_cap" type="cylinder"
+            fromto="0.03 0.068 0 0.037 0.068 0" size="0.017" material="cap_mat"/>
+      <geom class="visual" name="hip_roll_r_motor" type="cylinder"
+            fromto="-0.042 -0.068 0 0.03 -0.068 0" size="0.025" material="motor_mat"/>
+      <geom class="visual" name="hip_roll_r_cap" type="cylinder"
+            fromto="0.03 -0.068 0 0.037 -0.068 0" size="0.017" material="cap_mat"/>
+      <!-- waist with an LED ring -->
+      <geom class="visual" name="waist" type="cylinder"
+            fromto="0 0 0.04 0 0 0.08" size="0.03" material="frame_mat"/>
+      <geom class="visual" name="waist_led" type="cylinder"
+            fromto="0 0 0.056 0 0 0.062" size="0.0315" material="led_mat"/>
+      <!-- chest: a box shell whose four vertical edges are rounded off by
+           capsules, tapering into a narrower lower torso, over a graphite
+           back pack (battery) -->
+      <geom class="visual" name="chest" type="box" size="0.042 0.07 0.052"
+            pos="0 0 0.15" material="shell_mat"/>
+      <geom class="visual" name="chest_edge_fl" type="capsule"
+            fromto="0.03 0.058 0.1 0.03 0.058 0.2" size="0.013" material="shell_mat"/>
+      <geom class="visual" name="chest_edge_fr" type="capsule"
+            fromto="0.03 -0.058 0.1 0.03 -0.058 0.2" size="0.013" material="shell_mat"/>
+      <geom class="visual" name="chest_edge_bl" type="capsule"
+            fromto="-0.03 0.058 0.1 -0.03 0.058 0.2" size="0.013" material="shell_mat"/>
+      <geom class="visual" name="chest_edge_br" type="capsule"
+            fromto="-0.03 -0.058 0.1 -0.03 -0.058 0.2" size="0.013" material="shell_mat"/>
+      <geom class="visual" name="abdomen" type="box" size="0.034 0.05 0.025"
+            pos="0 0 0.09" material="frame_mat"/>
+      <geom class="visual" name="backpack" type="box" size="0.018 0.05 0.055"
+            pos="-0.046 0 0.145" material="frame_mat"/>
+      <geom class="visual" name="chest_led" type="box" size="0.002 0.034 0.0035"
+            pos="0.0425 0 0.175" material="led_mat"/>
+      <!-- shoulders and arms. The model has no arm joints, so the arms are
+           carried rigidly, slightly bent, the way a walking humanoid often
+           holds them still. -->
+      <geom class="visual" name="shoulder_yoke" type="capsule"
+            fromto="0 -0.085 0.19 0 0.085 0.19" size="0.019" material="frame_mat"/>
+      <geom class="visual" name="shoulder_l" type="cylinder"
+            fromto="0 0.085 0.19 0 0.112 0.19" size="0.024" material="motor_mat"/>
+      <geom class="visual" name="upper_arm_l" type="capsule"
+            fromto="0 0.118 0.185 -0.012 0.128 0.085" size="0.018" material="shell_mat"/>
+      <geom class="visual" name="elbow_l" type="cylinder"
+            fromto="-0.012 0.114 0.08 -0.012 0.142 0.08" size="0.018" material="motor_mat"/>
+      <geom class="visual" name="forearm_l" type="capsule"
+            fromto="-0.012 0.128 0.08 0.045 0.126 0.02" size="0.014" material="frame_mat"/>
+      <geom class="visual" name="hand_l" type="sphere" size="0.017"
+            pos="0.048 0.126 0.016" material="frame_mat"/>
+      <geom class="visual" name="shoulder_r" type="cylinder"
+            fromto="0 -0.085 0.19 0 -0.112 0.19" size="0.024" material="motor_mat"/>
+      <geom class="visual" name="upper_arm_r" type="capsule"
+            fromto="0 -0.118 0.185 -0.012 -0.128 0.085" size="0.018" material="shell_mat"/>
+      <geom class="visual" name="elbow_r" type="cylinder"
+            fromto="-0.012 -0.114 0.08 -0.012 -0.142 0.08" size="0.018" material="motor_mat"/>
+      <geom class="visual" name="forearm_r" type="capsule"
+            fromto="-0.012 -0.128 0.08 0.045 -0.126 0.02" size="0.014" material="frame_mat"/>
+      <geom class="visual" name="hand_r" type="sphere" size="0.017"
+            pos="0.048 -0.126 0.016" material="frame_mat"/>
+      <!-- neck and head. The black visor with its LED bar faces forward, so
+           pitch and heading stay readable at a glance. -->
+      <geom class="visual" name="neck" type="cylinder"
+            fromto="0 0 0.21 0 0 0.24" size="0.018" material="frame_mat"/>
+      <geom class="visual" name="head_shell" type="ellipsoid" size="0.043 0.038 0.042"
+            pos="0 0 0.272" material="shell_mat"/>
+      <geom class="visual" name="visor" type="ellipsoid" size="0.026 0.033 0.022"
+            pos="0.023 0 0.276" material="visor_mat"/>
+      <geom class="visual" name="visor_led" type="box" size="0.002 0.017 0.0025"
+            pos="0.0475 0 0.279" material="led_mat"/>
+      <!-- Chase cameras (Tab in the viewer). trackcom follows position
+           without inheriting the torso's attitude, so the horizon stays level
+           instead of rocking with every stride. `track` is side-on, as in the
+           planar version; `chase` is a three-quarter view from behind, which
+           is the one that shows roll and lateral sway. -->
+      <!-- Lights follow the robot too. The shadow map covers a box around
+           the light, so a fixed light would need it spread over the whole
+           60 m floor (blocky shadows); tracking lets <map shadowclip> keep
+           it tight around the robot. -->
+      <light name="key" mode="trackcom" pos="0 -2 4" dir="0 0.4 -1" directional="true"
+             diffuse="0.7 0.7 0.7" specular="0.3 0.3 0.3" castshadow="true"/>
+      <light name="fill" mode="trackcom" pos="0 3 3" dir="0 -1 -1" directional="true"
+             diffuse="0.25 0.25 0.3" castshadow="false"/>
+      <camera name="track" mode="trackcom" pos="0 -2.1 0.15" xyaxes="1 0 0 0 0.25 1"/>
+      <camera name="chase" mode="trackcom" pos="-1.3 -1.3 0.7"
+              xyaxes="0.707 -0.707 0 0.25 0.25 0.935"/>
+
+      <!-- ===================== left leg ===================== -->
+      <body name="thigh_l" pos="0 0.068 0">
+        <!-- hip_roll then hip: MuJoCo composes joints in one body in the
+             order listed, so roll acts first (about the torso's x axis) and
+             hip pitch then swings the leg inside the rolled plane. Both are
+             angles *relative to the torso*, not the world. -->
+        <joint class="hip_roll" name="hip_roll_l"/>
+        <joint class="leg" name="hip_l" damping="0.2"/>
+        <!-- hip-pitch motor on its hinge axis, pushed outboard so it clears
+             the hip-roll motor it crosses; LED ring on the rim -->
+        <geom class="visual" name="hip_l_motor" type="cylinder"
+              fromto="0 -0.008 0 0 0.04 0" size="0.035" material="motor_mat"/>
+        <geom class="visual" name="hip_l_led" type="cylinder"
+              fromto="0 0.034 0 0 0.039 0" size="0.0365" material="led_mat"/>
+        <geom class="visual" name="hip_l_cap" type="cylinder"
+              fromto="0 0.04 0 0 0.046 0" size="0.022" material="cap_mat"/>
+        <!-- thigh: graphite spar under a rounded shell -->
+        <geom class="visual" name="thigh_l_spar" type="capsule"
+              fromto="0 0 0 0 0 -0.17" size="0.017" material="frame_mat"/>
+        <geom class="visual" name="thigh_l_shell" type="ellipsoid"
+              size="0.031 0.027 0.07" pos="0.004 0 -0.085" material="shell_mat"/>
+        <!-- carries the thigh's mass: size and mass fixed, not drawn -->
+        <geom class="leg" name="thigh_l_visual" fromto="0 0 0 0 0 -0.17"
+              size="0.022" mass="0.07"/>
+
+        <body name="shin_l" pos="0 0 -0.17">
+          <!-- knee: qpos=0 means fully straight (shin collinear with thigh).
+               Since L1 = L2, the hip-to-foot line always exactly bisects the
+               thigh/shin angle - see controller.py.
+               There is deliberately NO passive joint spring here: like the MIT
+               Cheetah / ANYmal / Unitree quadrupeds, every joint is a plain
+               torque-controlled motor, and whatever compliance the leg shows
+               is produced actively by the controller. Range only keeps the
+               knee away from the q=0 singularity (a straight leg has no
+               knee-torque authority over leg length) and from folding past a
+               reasonable crouch. -->
+          <joint class="leg" name="knee_l" range="-2.0 -0.25" limited="true" damping="0.05"/>
+          <geom class="visual" name="knee_l_motor" type="cylinder"
+                fromto="0 -0.024 0 0 0.024 0" size="0.027" material="motor_mat"/>
+          <geom class="visual" name="knee_l_cap" type="cylinder"
+                fromto="0 -0.029 0 0 0.029 0" size="0.017" material="cap_mat"/>
+          <!-- shin: slim graphite tube with a shell guard on the front -->
+          <geom class="visual" name="shin_l_spar" type="capsule"
+                fromto="0 0 0 0 0 -0.15" size="0.014" material="frame_mat"/>
+          <geom class="visual" name="shin_l_guard" type="ellipsoid"
+                size="0.019 0.021 0.058" pos="0.01 0 -0.07" material="shell_mat"/>
+          <geom class="visual" name="ankle_l" type="cylinder"
+                fromto="0 0 -0.135 0 0 -0.15" size="0.019" material="cap_mat"/>
+          <geom class="leg" name="shin_l_visual" fromto="0 0 0 0 0 -0.17"
+                size="0.018" mass="0.035"/>
+          <!-- one of the only two colliding geoms on the robot -->
+          <geom name="foot_l" type="sphere" size="0.028" pos="0 0 -0.17"
+                mass="0.015" material="foot_mat"/>
+        </body>
+      </body>
+
+      <!-- ===================== right leg ====================
+           Identical to the left in every respect except the y offset; the
+           controller drives the pair symmetrically. -->
+      <body name="thigh_r" pos="0 -0.068 0">
+        <joint class="hip_roll" name="hip_roll_r"/>
+        <joint class="leg" name="hip_r" damping="0.2"/>
+        <!-- mirrored: outboard is -y on this side -->
+        <geom class="visual" name="hip_r_motor" type="cylinder"
+              fromto="0 0.008 0 0 -0.04 0" size="0.035" material="motor_mat"/>
+        <geom class="visual" name="hip_r_led" type="cylinder"
+              fromto="0 -0.034 0 0 -0.039 0" size="0.0365" material="led_mat"/>
+        <geom class="visual" name="hip_r_cap" type="cylinder"
+              fromto="0 -0.04 0 0 -0.046 0" size="0.022" material="cap_mat"/>
+        <geom class="visual" name="thigh_r_spar" type="capsule"
+              fromto="0 0 0 0 0 -0.17" size="0.017" material="frame_mat"/>
+        <geom class="visual" name="thigh_r_shell" type="ellipsoid"
+              size="0.031 0.027 0.07" pos="0.004 0 -0.085" material="shell_mat"/>
+        <geom class="leg" name="thigh_r_visual" fromto="0 0 0 0 0 -0.17"
+              size="0.022" mass="0.07"/>
+
+        <body name="shin_r" pos="0 0 -0.17">
+          <joint class="leg" name="knee_r" range="-2.0 -0.25" limited="true" damping="0.05"/>
+          <geom class="visual" name="knee_r_motor" type="cylinder"
+                fromto="0 -0.024 0 0 0.024 0" size="0.027" material="motor_mat"/>
+          <geom class="visual" name="knee_r_cap" type="cylinder"
+                fromto="0 -0.029 0 0 0.029 0" size="0.017" material="cap_mat"/>
+          <geom class="visual" name="shin_r_spar" type="capsule"
+                fromto="0 0 0 0 0 -0.15" size="0.014" material="frame_mat"/>
+          <geom class="visual" name="shin_r_guard" type="ellipsoid"
+                size="0.019 0.021 0.058" pos="0.01 0 -0.07" material="shell_mat"/>
+          <geom class="visual" name="ankle_r" type="cylinder"
+                fromto="0 0 -0.135 0 0 -0.15" size="0.019" material="cap_mat"/>
+          <geom class="leg" name="shin_r_visual" fromto="0 0 0 0 0 -0.17"
+                size="0.018" mass="0.035"/>
+          <geom name="foot_r" type="sphere" size="0.028" pos="0 0 -0.17"
+                mass="0.015" material="foot_mat"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- All six joints are plain torque motors; the controller (controller.py)
+         maps the MPC's ground reaction forces onto them through -J^T f while
+         a foot is planted, and tracks a swing trajectory otherwise.
+         NOTE: data.ctrl order is (hip_roll_l, hip_l, knee_l, hip_roll_r,
+         hip_r, knee_r) - sim.py and controller.py both assume this
+         interleaved per-leg layout, 3 entries per leg. -->
+    <motor name="hip_roll_l_torque" joint="hip_roll_l" gear="1" ctrlrange="-200 200"/>
+    <motor name="hip_l_torque" joint="hip_l" gear="1" ctrlrange="-200 200"/>
+    <motor name="knee_l_torque" joint="knee_l" gear="1" ctrlrange="-100 100"/>
+    <motor name="hip_roll_r_torque" joint="hip_roll_r" gear="1" ctrlrange="-200 200"/>
+    <motor name="hip_r_torque" joint="hip_r" gear="1" ctrlrange="-200 200"/>
+    <motor name="knee_r_torque" joint="knee_r" gear="1" ctrlrange="-100 100"/>
+  </actuator>
+
+  <keyframe>
+    <!-- qpos = (x, y, z, qw, qx, qy, qz,
+                 hip_roll_l, hip_l, knee_l, hip_roll_r, hip_r, knee_r).
+
+         Symmetric stand, the pose the gait starts from: both legs straight
+         down (hip = -knee/2, no roll) with the feet directly under the hips,
+         crouched to the gait's CoM height of 0.36 m (0.248 m of leg plus the
+         foot radius, so the feet rest exactly on the floor). The planar
+         version stood at 0.408 m; see `z_des` in controller.py for why the
+         3-D gait walks lower.
+
+         There is no standing keyframe for a "hold still" test any more. With
+         two point feet in 3-D the support polygon is a line segment, and the
+         robot is an inverted pendulum about that line whichever way the feet
+         are split - no controller can stand on it without stepping. The J^T
+         check in validate_mpc.py pins the base instead. -->
+    <key name="mpc_stand"
+         qpos="0 0 0.2757 1 0 0 0  0 0.7548 -1.5096  0 0.7548 -1.5096"/>
+  </keyframe>
+</mujoco>
