@@ -331,7 +331,7 @@ mujoco_sim/
 
 ## 15. 与 MATLAB 原版的关系
 
-原 MATLAB 代码（`Main.m` / `Stance_Controller.m`）是单腿 SLIP + Raibert
+原 MATLAB 代码（`matlab_sim/Main.m` / `matlab_sim/Stance_Controller.m`）是单腿 SLIP + Raibert
 三回路，与本方案已无对应关系。本方案**不再以复现 MATLAB 为目标**
 （用户已明确放宽这一约束），而是把它作为基线对照保留。
 

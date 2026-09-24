@@ -1,7 +1,7 @@
 [project]
 name = "mujoco-sim"
 version = "0.1.0"
-description = "3-D biped walking in MuJoCo under a convex MPC controller"
+description = "3-D biped and Unitree G1 walking in MuJoCo under a convex MPC controller"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
 # one-line launch: `uv run biped --view`
 biped = "mujoco_sim.sim:main"
 biped-avoid = "mujoco_sim.local_planner:main"
+g1 = "mujoco_sim.g1_sim:main"
 
 # Needed for the `biped` script to be installed at all: without a build
 # backend uv treats this as a virtual project, skips installing it, and

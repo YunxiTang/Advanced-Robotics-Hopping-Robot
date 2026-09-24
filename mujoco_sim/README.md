@@ -7,13 +7,17 @@ the three. It walks up to 1.3 m/s and runs, with both feet off the ground 30%
 of the time, up to 1.7 m/s, swinging its arms against its legs as it goes.
 By default it runs above 0.7 m/s and walks below.
 
+The same MPC also drives a **Unitree G1** humanoid (33 kg, 29 joints), up to
+0.7 m/s; see [Unitree G1](#unitree-g1).
+
 ```bash
 uv sync && ./fix_mjpython.sh        # once (the shell script is macOS-only)
 uv run biped --view                 # walk, with the viewer
+uv run g1 --view                    # the Unitree G1, walking
 ```
 
-That is the whole thing: `biped` is the only entry point, MPC is the only
-controller. `--view` opens the interactive viewer (Tab cycles through the
+That is the whole thing: `biped` and `g1` are the only entry points, MPC is
+the only controller. `--view` opens the interactive viewer (Tab cycles through the
 chase cameras); on macOS the command re-execs itself under `mjpython`
 automatically, because Cocoa requires GUI calls on the main thread.
 
@@ -578,6 +582,35 @@ Appearance and dynamics are fully separated:
 - **Contact:** the four sole-corner spheres of each foot are the only
   colliding geoms on the robot. They are hidden with the mass geoms (group
   3); the drawn sole covers them.
+
+## Unitree G1
+
+`uv run g1` walks MuJoCo Menagerie's Unitree G1 (`mujoco_sim/assets/unitree_g1/`,
+29 DOF, 33 kg, BSD-3) under the same MPC. The gait clock, footstep plan,
+SRBD model and QP are the biped's code (`G1WalkController` subclasses
+`MPCWalkController`). Three things are new, because G1's legs are 43% of its
+mass where the biped's are nearly weightless:
+
+- a **whole-body QP** (`wbc.py`) that turns the MPC's wrenches into torques
+  through the full rigid-body dynamics instead of `-J^T w`;
+- a **numerical swing-leg IK**, since G1's legs have no closed form;
+- a held **waist** and swinging **arms**.
+
+```bash
+uv run g1 --view                              # walk at 0.3 m/s
+uv run g1 --vs 0.6 --view                     # faster (ramped above 0.6 m/s)
+uv run g1 --vs 0.3 --yaw-rate 0.3 --view      # walk a circle
+uv run g1 --vs 0 --vy 0.1 --view              # sidestep
+uv run g1 --stand --push 4 100 0 --view       # stand, shoved at t = 4 s
+uv run python -m mujoco_sim.validate_g1 --jobs 8 --write   # its acceptance tests
+```
+
+All nine validation stages pass (`doc/g1_validation.md`, videos in
+`result/g1/`): standing through a 100 N shove, marching, walking at 0.3 and
+0.6 m/s, sidestepping, turning, and recovering from 120 N and 80 N shoves
+while walking, with roll and pitch p95 at or below 0.02 rad. It tops out
+near 0.7 m/s. `doc/g1_mpc.md` has the design, the measurements behind each
+choice, an ablation table, and the one "fix" that turned out to be the bug.
 
 ## Setup
 

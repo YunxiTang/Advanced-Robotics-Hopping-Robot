@@ -61,6 +61,7 @@ from .mpc import (NU_FOOT, NX, ONE, PX, PZ, ROLL, YAW, VX, VZ, WX, WZ,
                   ConvexMPC, SRBDParams, moment_to_world, reference_trajectory, rot_z)
 
 LEG_NAMES = ("l", "r")
+SIDE_WORD = {"l": "left", "r": "right"}   # for MJCF names spelled out in full
 # per-leg joint order: the column order of the 6x6 Jacobian, the torque
 # vector, and the leg's block of data.ctrl
 LEG_JOINTS = ("hip_yaw", "hip_roll", "hip", "knee", "ankle_pitch", "ankle_roll")
@@ -404,6 +405,17 @@ class MPCWalkController:
     `mpc.py` and checked end-to-end by validation stage 2.
     """
 
+    # MJCF names the controller binds to. Another robot (`g1_controller.py`)
+    # overrides these; everything else here only needs a floating base, two
+    # six-joint legs and a sole site on each foot.
+    ROOT_JOINT = "root"
+    BASE_BODY = "torso"          # the free joint's body
+    FOOT_BODY = "foot_{s}"
+    SOLE_SITE = "sole_{s}"       # the foot's reference point on the sole
+    LEG_JOINT = "{j}_{s}"
+    LEG_JOINTS = LEG_JOINTS
+    ARM_JOINTS = ARM_JOINTS
+
     def __init__(self, model, data, params: MPCGaitParams | None = None):
         import mujoco  # local: only the MPC gait needs MuJoCo inside the controller
 
@@ -418,17 +430,18 @@ class MPCWalkController:
 
         names = LEG_NAMES[: p.n_legs]
         self._side = np.array([1.0, -1.0])[: p.n_legs]   # +y for left, -y for right
-        self._foot_bid = [model.body(f"foot_{s}").id for s in names]
+        self._foot_bid = [model.body(self.FOOT_BODY.format(s=s, side=SIDE_WORD[s])).id for s in names]
         # the foot's reference point: the ankle projected onto the sole
-        self._sole_sid = [model.site(f"sole_{s}").id for s in names]
-        self._torso_bid = model.body("torso").id
+        self._sole_sid = [model.site(self.SOLE_SITE.format(s=s, side=SIDE_WORD[s])).id for s in names]
+        self._torso_bid = model.body(self.BASE_BODY).id
         self._floor_gid = model.geom("floor").id
-        root = model.joint("root").id
+        root = model.joint(self.ROOT_JOINT).id
         self._root_qadr = model.jnt_qposadr[root]
         self._root_vadr = model.jnt_dofadr[root]
         # the six DOFs per leg, in the LEG_JOINTS column order the 6x6
         # Jacobian and the torque vector both use
-        jids = [[model.joint(f"{j}_{s}").id for j in LEG_JOINTS] for s in names]
+        jids = [[model.joint(self.LEG_JOINT.format(j=j, s=s, side=SIDE_WORD[s])).id for j in self.LEG_JOINTS]
+                for s in names]
         self._leg_dofs = [model.jnt_dofadr[j] for j in jids]
         self._leg_qadr = [model.jnt_qposadr[j] for j in jids]
         # joint limits for clipping IK targets; +/-inf on unlimited joints
@@ -438,7 +451,8 @@ class MPCWalkController:
             rng[~model.jnt_limited[j].astype(bool)] = (-np.inf, np.inf)
             self._q_range.append(rng)
         self._ctrl_range = model.actuator_ctrlrange.copy()
-        ajids = [[model.joint(f"{j}_{s}").id for j in ARM_JOINTS] for s in names]
+        ajids = [[model.joint(self.LEG_JOINT.format(j=j, s=s, side=SIDE_WORD[s])).id for j in self.ARM_JOINTS]
+                 for s in names]
         self._arm_dofs = [model.jnt_dofadr[j] for j in ajids]
         self._arm_qadr = [model.jnt_qposadr[j] for j in ajids]
         self._arm_swing = np.zeros(p.n_legs)   # filtered shoulder-pitch targets
@@ -786,6 +800,17 @@ class MPCWalkController:
         dq = d.qvel[self._leg_dofs[leg]]
         return np.asarray(p.swing_kp) * (q_des - q) - np.asarray(p.swing_kd) * dq
 
+    def _stance_feedforward(self, leg: int) -> np.ndarray:
+        """Joint torques a stance leg adds on top of `-J^T w`: here the
+        joints' own viscous damping, cancelled (see `control`)."""
+        dofs = self._leg_dofs[leg]
+        return self.model.dof_damping[dofs] * self.data.qvel[dofs]
+
+    def leg_lengths(self) -> list:
+        """Hip-to-ankle distance of each leg, for logging."""
+        return [leg_length(self.data.qpos[a[3]], self.p.L1, self.p.L2)
+                for a in self._leg_qadr]
+
     def _arm_torques(self, dt: float) -> np.ndarray:
         """PD torques for both arms, in data.ctrl order (ARM_JOINTS, l then r).
 
@@ -918,8 +943,7 @@ class MPCWalkController:
                 # feet off the ground). Feeding the damping torque forward
                 # took those to 4% and 2%, halved the roll excursion, and
                 # removed a 0.08 rad steady pitch offset outright.
-                dofs = self._leg_dofs[i]
-                tau = tau + self.model.dof_damping[dofs] * d.qvel[dofs]
+                tau = tau + self._stance_feedforward(i)
             else:
                 s = (phases[i] - self.duty) / (1.0 - self.duty)
                 xy = self._lift[i] + s * (plan - self._lift[i])

@@ -17,11 +17,14 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from .controller import LEG_JOINTS, LEG_NAMES, MPCGaitParams, MPCWalkController, leg_length
+from .controller import LEG_NAMES, MPCGaitParams, MPCWalkController
 from .camera import HeadCamera, RGBDRecorder, colorize_depth, rgbd_stem
 from .video import VideoRecorder
 
 MODEL_PATH = Path(__file__).parent / "biped.xml"
+# logged leg torque -> joint (the biped's name; G1 calls its hip "hip_pitch")
+TAU_LOG = {"hip_yaw": "tau_yaw", "hip_roll": "tau_roll", "hip": "tau_hip", "knee": "tau_knee",
+           "ankle_pitch": "tau_ankle_pitch", "ankle_roll": "tau_ankle_roll"}
 
 
 @dataclass
@@ -90,7 +93,8 @@ def is_in_stance(model: mujoco.MjModel, data: mujoco.MjData) -> bool:
 def run(duration: float = 30.0, params=None, viewer: bool = False,
         disturbance=None, v_schedule=None, video=None, rgbd=None,
         head_cam_view: bool = False, model=None, on_step=None, decorate=None,
-        video_camera: str = "chase", stop=None) -> SimLog:
+        video_camera: str = "chase", stop=None,
+        controller_cls=MPCWalkController) -> SimLog:
     """Simulate `duration` seconds of walking or running.
 
     `disturbance`, if given, is (t_start, t_end, force): a push applied to
@@ -118,7 +122,8 @@ def run(duration: float = 30.0, params=None, viewer: bool = False,
     retarget `ctrl.p` (the local planner steers through it). `decorate(scene)`
     adds geoms to the viewer and video frames. `video_camera` names the
     camera `video` records from. `stop(data)`, if it returns True, ends the
-    run early.
+    run early. `controller_cls` drives another robot through the same loop
+    (`g1_controller.G1WalkController`, with `model` from `g1.load_model`).
     """
     if model is None:
         model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
@@ -133,11 +138,9 @@ def run(duration: float = 30.0, params=None, viewer: bool = False,
 
     # The controller needs MuJoCo itself: foot Jacobians for the -J^T f
     # mapping, and body frames for the footstep plan.
-    ctrl = MPCWalkController(model, data, params)
-    torso_bid = model.body("torso").id
+    ctrl = controller_cls(model, data, params)
+    torso_bid = ctrl._torso_bid
     log = SimLog.empty()
-
-    knee_qadr = [model.jnt_qposadr[model.joint(f"knee_{s}").id] for s in LEG_NAMES]
 
     def com_state() -> tuple[np.ndarray, np.ndarray]:
         """Whole-robot centre-of-mass position and velocity, both 3-D.
@@ -158,8 +161,7 @@ def run(duration: float = 30.0, params=None, viewer: bool = False,
         # Hip to ankle. Logged as the mean over the two legs: in an alternating gait they
         # are half a cycle apart, so this is a stride-average rather than a
         # per-leg trace.
-        l = float(np.mean([leg_length(data.qpos[a], ctrl.p.L1, ctrl.p.L2)
-                           for a in knee_qadr]))
+        l = float(np.mean(ctrl.leg_lengths()))
         # body mechanical energy only: there is no passive spring in the
         # model, so there is no elastic term to add here.
         ke = 0.5 * params_m * float(vel @ vel)
@@ -176,9 +178,11 @@ def run(duration: float = 30.0, params=None, viewer: bool = False,
         # data.ctrl is interleaved per leg: LEG_JOINTS x (l, r). Logged as
         # totals across legs, which is the quantity acting on the body as a
         # whole.
-        n = len(LEG_JOINTS)
-        for k, name in enumerate(("tau_yaw", "tau_roll", "tau_hip", "tau_knee",
-                                  "tau_ankle_pitch", "tau_ankle_roll")):
+        # Columns are looked up by joint role, so a robot whose legs order
+        # their joints differently (G1: pitch first) logs the same way.
+        n = len(ctrl.LEG_JOINTS)
+        for joint, name in TAU_LOG.items():
+            k = ctrl.LEG_JOINTS.index(joint if joint in ctrl.LEG_JOINTS else f"{joint}_pitch")
             getattr(log, name).append(float(data.ctrl[k:2 * n:n].sum()))
         log.energy.append(ke + pe)
         log.duty.append(ctrl.duty)
@@ -217,7 +221,7 @@ def run(duration: float = 30.0, params=None, viewer: bool = False,
         for _ in range(max_steps):
             if data.time >= duration:
                 break
-            in_stance = is_in_stance(model, data)
+            in_stance = any(ctrl._in_contact(i) for i in range(ctrl.p.n_legs))
 
             if stop is not None and stop(data):
                 break
